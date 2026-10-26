@@ -13,6 +13,7 @@ R=${VE_ROOT:-}
 SELF=$(readlink -f "${BASH_SOURCE[0]}")
 SRC_DIR=$(dirname "$SELF")
 BUILD=$SRC_DIR/../build/$EDID_NAME
+PREBUILT=$SRC_DIR/$EDID_NAME   # the default EDID, committed to the repo
 
 # Ubuntu
 UB_FW=$R/usr/lib/firmware/edid/$EDID_NAME
@@ -177,7 +178,11 @@ install_cmd() {
     esac
     shift
   done
-  [ -f "$BUILD" ] || die "no EDID at $BUILD; run '$0 build' first (as your user)"
+  if [ ! -f "$BUILD" ]; then
+    [ -f "$PREBUILT" ] || die "no EDID at $BUILD; run '$0 build' first (as your user)"
+    echo "No local build; using the bundled default EDID ($PREBUILT)."
+    BUILD=$PREBUILT
+  fi
   local size; size=$(stat -c %s "$BUILD")
   [ $((size % 128)) = 0 ] || die "$BUILD is $size bytes; an EDID is a multiple of 128"
   [ -n "$connector" ] || connector=$(detect_connector)
@@ -239,8 +244,8 @@ usage() {
   cat <<EOF
 Usage: $NAME <command>
 
-  build [make_edid.py options]   generate ../build/$EDID_NAME (run as your user)
-                                 e.g. build --preferred 2560x1440@120
+  build [make_edid.py options]   generate ../build/$EDID_NAME (run as your user);
+                                 without a build, install uses the bundled default
   install [--connector NAME] [--file EDID] [--force]
                                  install the EDID and boot config (root), then reboot
   uninstall                      remove it (root), then reboot

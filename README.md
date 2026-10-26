@@ -249,10 +249,21 @@ the same mode list: KDE's display settings, Gamescope, and Steam's resolution
 and refresh pickers in Game Mode.
 
 ```sh
-edid/vm-edid build                    # as your user; writes build/vm-edid.bin
 sudo edid/vm-edid install             # then reboot
 edid/vm-edid status                   # after the reboot
 ```
+
+The default EDID is bundled as [`edid/vm-edid.bin`](edid/vm-edid.bin), so no
+build step or Python is needed for the defaults. The generator is
+deterministic, so you can check the bundled file against a fresh build
+(SHA-256 starts with `8b3830d8ea85`):
+
+```sh
+python3 edid/make_edid.py -o /tmp/vm-edid.bin && cmp /tmp/vm-edid.bin edid/vm-edid.bin && echo identical
+```
+
+For a custom EDID, run `edid/vm-edid build [options]` as your user first; it
+writes `build/vm-edid.bin`, which `install` prefers over the bundled file.
 
 Tested on Bazzite (Gamescope): the full default matrix below boots with
 1024x768 preferred and every mode listed, and it passes `edid-decode` and
@@ -324,7 +335,7 @@ python3 edid/make_edid.py --list          # print the modes without writing a fi
 
 | | Ubuntu 26.04 | Bazzite |
 |---|---|---|
-| EDID file | `/usr/lib/firmware/edid/vm-edid.bin` | `/etc/firmware/edid/vm-edid.bin` (`/usr` is read-only) |
+| EDID file | `/usr/lib/firmware/edid/vm-edid.bin` | `/etc/firmware/edid/vm-edid-<hash>.bin` (`/usr` is read-only) |
 | Kernel arguments | `/etc/default/grub.d/99-vm-edid.cfg`, then `update-grub` | `rpm-ostree kargs`: `drm.edid_firmware=…` and `firmware_class.path=/etc/firmware` |
 | Initramfs | hook `/etc/initramfs-tools/hooks/vm-edid`, then `update-initramfs -u` | `rpm-ostree initramfs-etc --track` (virtio-gpu is built into the kernel and starts early) |
 
@@ -393,6 +404,7 @@ share/                           manifest, systemd unit, apt hook, config templa
 sunshine-dmabuf-fix              build/install/check/status/uninstall
 edid/make_edid.py                EDID generator for high-refresh VM modes
 edid/vm-edid                     build/install/uninstall/status for the EDID
+edid/vm-edid.bin                 the bundled default EDID (output of make_edid.py)
 third_party/Vulkan-Headers       submodule, pinned to v1.4.366 (headers only)
 ```
 
