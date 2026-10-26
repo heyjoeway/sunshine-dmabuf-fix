@@ -121,6 +121,17 @@ install_bazzite() {
   INSTALLED_KARG=$karg
   [ -n "$R" ] && return
 
+  # Initramfs first: track the new EDID and untrack every other one in a single
+  # transaction. Every rpm-ostree transaction rebuilds the overlay from the
+  # tracked list, so a tracked file must never be missing when one runs.
+  local t track=() tracked
+  tracked=$(bz_tracked_edids)
+  grep -qx "$path" <<<"$tracked" || track+=(--track="$path")
+  for t in $tracked; do
+    [ "$t" = "$path" ] || track+=(--untrack="$t")
+  done
+  [ ${#track[@]} -gt 0 ] && rpm-ostree initramfs-etc "${track[@]}"
+
   current=$(bz_current_karg)
   local args=()
   rpm-ostree kargs | tr ' ' '\n' | grep -qx "firmware_class.path=$BZ_FW_DIR" ||
@@ -133,35 +144,23 @@ install_bazzite() {
   fi
   [ ${#args[@]} -gt 0 ] && rpm-ostree kargs "${args[@]}"
 
-  # Track the new EDID and stop shipping any other EDID in the initramfs.
-  local t track=() tracked
-  tracked=$(bz_tracked_edids)
-  grep -qx "$path" <<<"$tracked" || track+=(--track="$path")
-  for t in $tracked; do
-    [ "$t" = "$path" ] || track+=(--untrack="$t")
-  done
-  [ ${#track[@]} -gt 0 ] && rpm-ostree initramfs-etc "${track[@]}"
-
-  # Remove EDIDs from earlier installs of this tool (other files are left alone).
-  for t in "$BZ_FW_DIR"/edid/$NAME-*.bin "$BZ_FW_DIR/edid/$NAME.bin"; do
-    [ -e "$t" ] && [ "$t" != "$path" ] && rm -f "$t"
-  done
+  # Earlier EDID files are left in place: another deployment (the booted one,
+  # or a rollback) may still track them, and a missing tracked file makes
+  # every later rpm-ostree transaction fail.
   true
 }
 
 uninstall_bazzite() {
-  if [ -n "$R" ]; then
-    rm -f "$R$BZ_FW_DIR"/edid/$NAME-*.bin "$R$BZ_FW_DIR/edid/$NAME.bin"
-    return
-  fi
+  [ -n "$R" ] && return
   local current t untrack=()
-  current=$(bz_current_karg)
-  [ -n "$current" ] && rpm-ostree kargs --delete="$current" --delete-if-present="firmware_class.path=$BZ_FW_DIR"
   for t in $(bz_tracked_edids); do
     case ${t##*/} in $NAME-*.bin | $NAME.bin) untrack+=(--untrack="$t") ;; esac
   done
   [ ${#untrack[@]} -gt 0 ] && rpm-ostree initramfs-etc "${untrack[@]}"
-  rm -f "$BZ_FW_DIR"/edid/$NAME-*.bin "$BZ_FW_DIR/edid/$NAME.bin"
+  current=$(bz_current_karg)
+  [ -n "$current" ] && rpm-ostree kargs --delete="$current" --delete-if-present="firmware_class.path=$BZ_FW_DIR"
+  echo "EDID files stay in $BZ_FW_DIR/edid/ (older deployments may still track them);"
+  echo "delete them once no deployment lists them in 'rpm-ostree status'."
 }
 
 # ------------------------------------------------------------ commands

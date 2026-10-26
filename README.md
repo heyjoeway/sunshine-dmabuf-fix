@@ -335,9 +335,17 @@ On Bazzite the file is named after its content (`vm-edid-<hash>.bin`).
 `rpm-ostree initramfs-etc` keeps reusing its initramfs overlay while the set of
 tracked paths stays the same, and `--force-sync` did not pick up a changed file
 in testing: the kernel kept loading the first EDID ever installed. A new name
-per EDID forces a new overlay. Reinstalling replaces the kernel argument,
-untracks other EDIDs under `/etc/firmware/edid/`, and deletes this tool's
-earlier files.
+per EDID forces a new overlay. Reinstalling untracks other EDIDs under
+`/etc/firmware/edid/` and replaces the kernel argument. Old EDID files are
+kept: every rpm-ostree transaction rebuilds the overlay from the tracked list,
+and a file that some deployment still tracks must not disappear.
+
+Bazzite applies the new deployment while shutting down (ostree's finalize
+step, limited to 5 minutes). If the VM is busy, for example still driving a
+huge mode, finalizing can time out and the update is silently dropped
+(`journalctl -b -1 -u ostree-finalize-staged` shows "Stopping timed out").
+Stopping the display manager first (`sudo systemctl stop sddm`) before
+rebooting avoids that.
 
 After rebooting, `edid/vm-edid status` shows the EDID the kernel actually
 loaded (name, preferred mode, resolution count) and whether it matches the
