@@ -9,8 +9,15 @@ of the same capture is clean.
 It installs a small Vulkan layer and keeps it correct across system updates.
 The layer switches itself off whenever it isn't needed or stops helping.
 
-Supported: **Ubuntu 26.04 LTS** (tested) and **Bazzite** (designed for, not
-yet tested).
+> [!WARNING]
+> **Bazzite support is planned but untested.** Everything here has been
+> verified on Ubuntu 26.04 LTS only: a Proxmox VE 9 host, a Renoir iGPU and
+> GNOME on Wayland. The Bazzite install path (container build, Homebrew
+> Sunshine) is written but has never been run. See [Limitations](#limitations),
+> and please open an issue with your results if you try it.
+
+Supported: **Ubuntu 26.04 LTS** (tested). **Bazzite** is planned; the
+installer accepts it, but it's untested.
 
 ## The bug
 
@@ -32,7 +39,7 @@ this repo unnecessary.
 ## Install
 
 ```sh
-git clone --recurse-submodules <this repo> sunshine-dmabuf-fix
+git clone --recurse-submodules https://github.com/<owner>/sunshine-dmabuf-fix.git
 cd sunshine-dmabuf-fix
 ./sunshine-dmabuf-fix build          # as your user
 sudo ./sunshine-dmabuf-fix install
@@ -189,3 +196,7 @@ third_party/Vulkan-Headers       submodule, pinned to v1.4.366 (headers only)
 
 The layer and self-test load `libvulkan.so.1` and `libgbm.so.1` at runtime.
 Building needs only a C compiler and the submodule.
+
+## License
+
+MIT, see [LICENSE](LICENSE). Vulkan-Headers (submodule) is Apache-2.0 OR MIT.
