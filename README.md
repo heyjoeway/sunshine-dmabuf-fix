@@ -9,15 +9,15 @@ of the same capture is clean.
 It installs a small Vulkan layer and keeps it correct across system updates.
 The layer switches itself off whenever it isn't needed or stops helping.
 
-> [!WARNING]
-> **Bazzite support is planned but untested.** Everything here has been
-> verified on Ubuntu 26.04 LTS only: a Proxmox VE 9 host, a Renoir iGPU and
-> GNOME on Wayland. The Bazzite install path (container build, Homebrew
-> Sunshine) is written but has never been run. See [Limitations](#limitations),
-> and please open an issue with your results if you try it.
+Supported and tested, each with a clean Moonlight stream:
 
-Supported: **Ubuntu 26.04 LTS** (tested). **Bazzite** is planned; the
-installer accepts it, but it's untested.
+| System | Host GPU | Desktop | Sunshine |
+|---|---|---|---|
+| Ubuntu 26.04 LTS | Renoir iGPU | GNOME on Wayland | `.deb` 2026.914 |
+| Bazzite (deck image, Fedora 44 base) | RX 6700 XT (Navi22) | Gamescope and KDE Plasma | Homebrew `sunshine-beta` 2026.1018 |
+
+Both run as Proxmox VE 9 guests. Bazzite has a few problems of its own that
+this layer doesn't fix; see [Bazzite notes](#bazzite-notes).
 
 ## The bug
 
@@ -46,9 +46,10 @@ sudo ./sunshine-dmabuf-fix install
 ```
 
 - **Ubuntu** needs `gcc` (`sudo apt install gcc`).
-- **Bazzite** has no compiler on the host. `build` uses `podman` to compile
-  in a throwaway Fedora container, or you can run it inside a toolbox or
-  distrobox. Run `build` as your user so the build output isn't owned by root.
+- **Bazzite** ships `gcc` on the host, and that's the tested path. If no
+  compiler is found, `build` falls back to compiling in a throwaway Fedora
+  container with `podman`. That fallback is untested. Run `build` as your user
+  so the build output isn't owned by root.
 
 Sunshine uses the layer from its next stream onwards. Then check:
 
@@ -171,18 +172,66 @@ case, systemctl calls are skipped.
 
 ## Limitations
 
-- **Bazzite is untested.** Bazzite installs Sunshine from Homebrew
-  (`ujust setup-sunshine` → `lizardbyte/homebrew/sunshine-beta`).
-  - Homebrew's own Mesa is built without `amdgpu-virtio`, so Sunshine has to
-    end up on Bazzite's system RADV, which does have it.
-  - Confirm that the `GPU listing` in Sunshine's log shows `RADV` and that the
-    `active` line appears.
-  - The self-test exercises the system loader and Mesa, not Homebrew's.
+- **Homebrew Sunshine (Bazzite) is checked only indirectly.** The self-test
+  exercises the system Vulkan loader and Mesa, not Homebrew's. In practice,
+  Homebrew's loader also finds Bazzite's system RADV, and the layer engages.
+  The `active` line in Sunshine's log confirms it.
+- **The podman build fallback is untested.**
 - **Flatpak Sunshine can't see host layers.** It would need this packaged as
   a Flatpak extension.
 - The self-test approximates the compositor's buffer with a GBM scanout
   allocation. It doesn't capture the real screen, because that needs
   `CAP_SYS_ADMIN` and a running session.
+
+## Bazzite notes
+
+Bazzite installs Sunshine from Homebrew (`ujust setup-sunshine` →
+`lizardbyte/homebrew/sunshine-beta`). Getting a clean stream in a
+native-context VM also took the fixes below. None of them involve this layer.
+
+- **Use a Sunshine build that includes
+  [LizardByte/Sunshine#5675](https://github.com/LizardByte/Sunshine/pull/5675).**
+  2026.1018 has it; 2026.907 doesn't. Older builds crash on the first frame
+  with `vkQueueSubmit: Invalid queue` in `dispatch_compute`, and Moonlight
+  shows a black screen with any encoder. Bazzite pins the formula, so upgrade
+  with:
+  ```sh
+  brew unpin lizardbyte/homebrew/sunshine-beta
+  brew upgrade lizardbyte/homebrew/sunshine-beta
+  brew pin lizardbyte/homebrew/sunshine-beta
+  ```
+- **Re-run `postinst` after every Sunshine upgrade.** Without it, KMS capture
+  loses `CAP_SYS_ADMIN`. The log shows `Failed to gain CAP_SYS_ADMIN`, and
+  Moonlight fails with error 503.
+  ```sh
+  sudo "$(brew --prefix sunshine-beta)/bin/postinst"
+  ```
+- **Moonlight can't find the host.** The log shows
+  `Failed to create client: Daemon not running`. Homebrew's `libdbus` looks for
+  the system bus under the Homebrew prefix, so Avahi publishing fails. Sunshine
+  has file capabilities, so `DBUS_SYSTEM_BUS_ADDRESS` is ignored. Point the
+  Homebrew path at the real bus, then restart Sunshine:
+  ```sh
+  ln -sfn /run/dbus/system_bus_socket "$(brew --prefix)/var/run/dbus/system_bus_socket"
+  systemctl --user restart app-dev.lizardbyte.app.Sunshine
+  ```
+- **Set `encoder = vulkan`.** VA-API doesn't work under native context.
+  Sunshine falls back to Vulkan by itself, but only after a failed probe.
+- **Flatpak browsers crash** with `importing the supplied dmabufs failed`. The
+  Flatpak runtime's Mesa is built without `amdgpu-virtio`. Workarounds:
+  - Firefox: `flatpak override --user --env=LIBGL_ALWAYS_SOFTWARE=1 org.mozilla.firefox`
+  - Chrome: add `--disable-gpu` to `~/.var/app/com.google.Chrome/config/chrome-flags.conf`
+- **"Switch to Desktop" loops back to Gamescope.** This happened in a VM whose
+  hardware clock was in local time: a file in `/etc/sddm.conf.d` got a future
+  timestamp. SDDM only reloads its config when a file there is newer than the
+  newest one it has seen, so it ignored the switch.
+  ```sh
+  find /etc/sddm.conf.d -newermt now                      # list future-dated files
+  sudo timedatectl set-local-rtc 0                        # keep the RTC in UTC
+  sudo touch /etc/sddm.conf.d/* && sudo systemctl restart sddm
+  ```
+  The stale file in this case was `99-plasma-setup.conf`, left behind after
+  `plasma-setup` was removed from the image. Deleting it is fine.
 
 ## Layout
 
