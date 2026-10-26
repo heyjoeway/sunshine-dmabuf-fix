@@ -272,16 +272,19 @@ blanking v2 timings:
 | 32:9 | 3840x1080, 5120x1440, 7680x2160 |
 
 Refresh rates: 60, 75, 100, 120, 144, 165, 175, 180, 200, 240, 280 and 360 Hz.
-The desktop starts at the preferred mode, 1280x800 @ 60 by default; pick a
-bigger mode in KDE's display settings or Steam's display settings afterwards.
+The desktop starts at the preferred mode, 1024x768 @ 60. Pick your real mode
+once in KDE's display settings or Steam's display settings; both remember it
+per monitor, so later boots come up in it.
 
-**The preferred mode must match the VM's scanout size.** virtio-gpu deletes any
-mode flagged preferred unless it's 1024x768 or within 16 pixels of the size
-QEMU reports: the device's `xres`/`yres`, 1280x800 unless set. Without a
-preferred mode, compositors start at the first mode in the list, which is the
-biggest one: Gamescope comes up at 7680x2160 @ 360 Hz, and boot can slow to a crawl. The
-generator refuses a preferred mode that would be deleted. To start at
-2560x1440 @ 120, set the size on the host and tell the generator:
+**Why 1024x768:** virtio-gpu deletes any mode flagged preferred unless it's
+1024x768 or within 16 pixels of the scanout size QEMU reports. That size starts
+as the device's `xres`/`yres` (1280x800 unless set) but can follow the console
+client, for example noVNC with remote resizing. Without a preferred mode,
+compositors and the boot console start at the biggest mode in the list: here
+that was 7680x2160 @ 360 Hz, which left the boot screen panned and coincided
+with boot taking minutes. 1024x768 is the one size that's always kept. For a
+different preferred mode, pin the scanout size on the host and tell the
+generator; the generator refuses a preferred mode that would be deleted:
 
 ```sh
 # Proxmox host, /etc/pve/qemu-server/<vmid>.conf (append to any existing args:)
