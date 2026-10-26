@@ -22,7 +22,7 @@ Supported and tested, each with a clean Moonlight stream:
 | System | Host GPU | Desktop | Sunshine |
 |---|---|---|---|
 | Ubuntu 26.04 LTS | Renoir iGPU | GNOME on Wayland | `.deb` 2026.914 |
-| Bazzite (deck image, Fedora 44 base) | RX 6700 XT (Navi22) | Gamescope and KDE Plasma | Homebrew `sunshine-beta` 2026.1018 |
+| Bazzite (deck image: stable 44.20261023 and testing 45.20261025) | RX 6700 XT (Navi22) | Gamescope and KDE Plasma | Homebrew `sunshine-beta` 2026.1018 |
 
 Both run as Proxmox VE 9 guests. Bazzite has a few problems of its own that
 this layer doesn't fix; see [Bazzite notes](#bazzite-notes).
