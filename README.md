@@ -265,10 +265,11 @@ python3 edid/make_edid.py -o /tmp/vm-edid.bin && cmp /tmp/vm-edid.bin edid/vm-ed
 For a custom EDID, run `edid/vm-edid build [options]` as your user first; it
 writes `build/vm-edid.bin`, which `install` prefers over the bundled file.
 
-Tested on Bazzite (Gamescope): the full default matrix below boots with
-1024x768 preferred and every mode listed, and it passes `edid-decode` and
-libdisplay-info (the parser KWin and Gamescope use) with no warnings. It
-hasn't been booted on Ubuntu yet.
+Tested on Bazzite (Gamescope) and Ubuntu 26.04 (GNOME): the full default
+matrix below boots with 1024x768 preferred and every mode listed, and it
+passes `edid-decode` and libdisplay-info (the parser KWin and Gamescope use)
+with no warnings. GNOME offers 159 of the kernel's 161 modes, including every
+resolution at 60–360 Hz.
 
 ### Default modes
 
