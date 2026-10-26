@@ -254,10 +254,10 @@ sudo edid/vm-edid install             # then reboot
 edid/vm-edid status                   # after the reboot
 ```
 
-The boot-time approach was tested on Bazzite in Gamescope, using an earlier
-six-mode EDID (4K120, 1440p120/240). The full default matrix below passes
-`edid-decode` and libdisplay-info (the parser KWin and Gamescope use) with no
-warnings, but hasn't been booted on either system yet.
+Tested on Bazzite (Gamescope): the full default matrix below boots with
+1024x768 preferred and every mode listed, and it passes `edid-decode` and
+libdisplay-info (the parser KWin and Gamescope use) with no warnings. It
+hasn't been booted on Ubuntu yet.
 
 ### Default modes
 
