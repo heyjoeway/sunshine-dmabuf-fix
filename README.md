@@ -329,8 +329,19 @@ python3 edid/make_edid.py --list          # print the modes without writing a fi
 | Initramfs | hook `/etc/initramfs-tools/hooks/vm-edid`, then `update-initramfs -u` | `rpm-ostree initramfs-etc --track` (virtio-gpu is built into the kernel and starts early) |
 
 The connector is detected automatically: it's the one connected `Virtual-N`
-output; override it with `--connector`. On Bazzite, a reinstall replaces an
-existing `drm.edid_firmware=` argument and untracks the EDID it pointed at.
+output; override it with `--connector`.
+
+On Bazzite the file is named after its content (`vm-edid-<hash>.bin`).
+`rpm-ostree initramfs-etc` keeps reusing its initramfs overlay while the set of
+tracked paths stays the same, and `--force-sync` did not pick up a changed file
+in testing: the kernel kept loading the first EDID ever installed. A new name
+per EDID forces a new overlay. Reinstalling replaces the kernel argument,
+untracks other EDIDs under `/etc/firmware/edid/`, and deletes this tool's
+earlier files.
+
+After rebooting, `edid/vm-edid status` shows the EDID the kernel actually
+loaded (name, preferred mode, resolution count) and whether it matches the
+installed file.
 
 ### Surviving updates
 

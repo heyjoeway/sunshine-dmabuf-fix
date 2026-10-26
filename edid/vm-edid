@@ -51,7 +51,7 @@ detect_connector() {
   esac
 }
 
-karg_value() { echo "$KARG_KEY=$1:edid/$EDID_NAME"; }
+karg_value() { echo "$KARG_KEY=$1:edid/${2:-$EDID_NAME}"; }  # $1 connector, $2 file name
 
 # ------------------------------------------------------------------ build
 
@@ -63,7 +63,8 @@ build() {
 # ---------------------------------------------------------------- Ubuntu
 
 install_ubuntu() {
-  local karg=$1
+  local karg; karg=$(karg_value "$1")
+  INSTALLED_KARG=$karg
   install -D -m 0644 "$BUILD" "$UB_FW"
   # Copy the EDID into every initramfs, in case virtio-gpu ever loads from it.
   mkdir -p "$(dirname "$UB_HOOK")"
@@ -96,51 +97,71 @@ uninstall_ubuntu() {
 }
 
 # --------------------------------------------------------------- Bazzite
+#
+# rpm-ostree initramfs-etc reuses its initramfs overlay as long as the set of
+# tracked paths is unchanged (--force-sync did not pick up a changed file in
+# testing), so each EDID gets a content-hashed file name: a new EDID is a new
+# tracked path, which forces a new overlay.
 
 bz_current_karg() { rpm-ostree kargs | tr ' ' '\n' | grep "^$KARG_KEY=" || true; }
 
-bz_tracked() {  # $1 = path; is it tracked by rpm-ostree initramfs-etc?
+bz_tracked_edids() {  # tracked paths under $BZ_FW_DIR/edid/
   rpm-ostree status --json | python3 -I -c '
 import json, sys
 d = json.load(sys.stdin)["deployments"][0]
-print("\n".join(d.get("initramfs-etc", [])))' | grep -qx "$1"
+print("\n".join(d.get("initramfs-etc", [])))' | grep "^$BZ_FW_DIR/edid/" || true
 }
 
 install_bazzite() {
-  local karg=$1 current
-  install -D -m 0644 "$BUILD" "$BZ_FW"
+  local connector=$1 name path karg current
+  name=$NAME-$(sha256sum "$BUILD" | cut -c1-12).bin
+  path=$BZ_FW_DIR/edid/$name
+  karg=$(karg_value "$connector" "$name")
+  install -D -m 0644 "$BUILD" "$R$path"
+  INSTALLED_KARG=$karg
   [ -n "$R" ] && return
+
   current=$(bz_current_karg)
-  local args=(--append-if-missing="firmware_class.path=$BZ_FW_DIR")
+  local args=()
+  rpm-ostree kargs | tr ' ' '\n' | grep -qx "firmware_class.path=$BZ_FW_DIR" ||
+    args+=(--append="firmware_class.path=$BZ_FW_DIR")
   if [ -z "$current" ]; then
     args+=(--append="$karg")
   elif [ "$current" != "$karg" ]; then
     args+=(--replace="$karg")
-    echo "Replacing existing $current"
-    # Stop shipping the EDID the old argument pointed at (the file itself is kept).
-    local old=$BZ_FW_DIR/${current##*:}
-    if [ "$old" != "$BZ_FW_DIR/edid/$EDID_NAME" ] && bz_tracked "$old"; then
-      rpm-ostree initramfs-etc --untrack="$old"
-    fi
+    echo "Replacing $current"
   fi
-  rpm-ostree kargs "${args[@]}"
-  # initramfs-etc copies the file into the initramfs; --force-sync picks up a changed file.
-  if bz_tracked "$BZ_FW_DIR/edid/$EDID_NAME"; then
-    rpm-ostree initramfs-etc --force-sync
-  else
-    rpm-ostree initramfs-etc --track="$BZ_FW_DIR/edid/$EDID_NAME"
-  fi
+  [ ${#args[@]} -gt 0 ] && rpm-ostree kargs "${args[@]}"
+
+  # Track the new EDID and stop shipping any other EDID in the initramfs.
+  local t track=() tracked
+  tracked=$(bz_tracked_edids)
+  grep -qx "$path" <<<"$tracked" || track+=(--track="$path")
+  for t in $tracked; do
+    [ "$t" = "$path" ] || track+=(--untrack="$t")
+  done
+  [ ${#track[@]} -gt 0 ] && rpm-ostree initramfs-etc "${track[@]}"
+
+  # Remove EDIDs from earlier installs of this tool (other files are left alone).
+  for t in "$BZ_FW_DIR"/edid/$NAME-*.bin "$BZ_FW_DIR/edid/$NAME.bin"; do
+    [ -e "$t" ] && [ "$t" != "$path" ] && rm -f "$t"
+  done
+  true
 }
 
 uninstall_bazzite() {
-  rm -f "$BZ_FW"
-  [ -n "$R" ] && return
-  local current
+  if [ -n "$R" ]; then
+    rm -f "$R$BZ_FW_DIR"/edid/$NAME-*.bin "$R$BZ_FW_DIR/edid/$NAME.bin"
+    return
+  fi
+  local current t untrack=()
   current=$(bz_current_karg)
-  [ -n "$current" ] && rpm-ostree kargs --delete="$current"
-  rpm-ostree kargs --delete-if-present="firmware_class.path=$BZ_FW_DIR"
-  bz_tracked "$BZ_FW_DIR/edid/$EDID_NAME" && rpm-ostree initramfs-etc --untrack="$BZ_FW_DIR/edid/$EDID_NAME"
-  true
+  [ -n "$current" ] && rpm-ostree kargs --delete="$current" --delete-if-present="firmware_class.path=$BZ_FW_DIR"
+  for t in $(bz_tracked_edids); do
+    case ${t##*/} in $NAME-*.bin | $NAME.bin) untrack+=(--untrack="$t") ;; esac
+  done
+  [ ${#untrack[@]} -gt 0 ] && rpm-ostree initramfs-etc "${untrack[@]}"
+  rm -f "$BZ_FW_DIR"/edid/$NAME-*.bin "$BZ_FW_DIR/edid/$NAME.bin"
 }
 
 # ------------------------------------------------------------ commands
@@ -161,16 +182,15 @@ install_cmd() {
   local size; size=$(stat -c %s "$BUILD")
   [ $((size % 128)) = 0 ] || die "$BUILD is $size bytes; an EDID is a multiple of 128"
   [ -n "$connector" ] || connector=$(detect_connector)
-  local karg; karg=$(karg_value "$connector")
 
   local os; os=$(detect_os)
   case $os in
-    ubuntu-lts) install_ubuntu "$karg" ;;
-    bazzite) install_bazzite "$karg" ;;
-    ubuntu-*) [ $force = 1 ] || die "untested Ubuntu release '$os'; use --force"; install_ubuntu "$karg" ;;
+    ubuntu-lts) install_ubuntu "$connector" ;;
+    bazzite) install_bazzite "$connector" ;;
+    ubuntu-*) [ $force = 1 ] || die "untested Ubuntu release '$os'; use --force"; install_ubuntu "$connector" ;;
     *) die "unsupported system '$os' (supported: Ubuntu 26.04 LTS, Bazzite)" ;;
   esac
-  echo "Installed $EDID_NAME for $connector ($karg). Reboot to use it."
+  echo "Installed for $connector ($INSTALLED_KARG). Reboot to use it."
 }
 
 uninstall_cmd() {
@@ -183,24 +203,36 @@ uninstall_cmd() {
 }
 
 status_cmd() {
-  echo "System:     $(detect_os)"
-  local arg
+  echo "System:      $(detect_os)"
+  local arg file=""
   arg=$(tr ' ' '\n' < /proc/cmdline | grep "^$KARG_KEY=" || true)
   echo "Booted with: ${arg:-no $KARG_KEY}"
+  if [ -n "$arg" ]; then
+    local rel=${arg##*:} dir
+    for dir in $(tr ' ' '\n' < /proc/cmdline | sed -n 's/^firmware_class.path=//p') /usr/lib/firmware /lib/firmware; do
+      [ -f "$dir/$rel" ] && { file=$dir/$rel; break; }
+    done
+  fi
   local c
   for c in /sys/class/drm/card*-Virtual-*; do
     [ -e "$c/edid" ] || continue
-    local name
-    name=$(python3 -I - "$c/edid" <<'EOF'
-import sys
-e = open(sys.argv[1], "rb").read()
+    python3 -I - "$c/edid" "${c##*/card[0-9]-}" "$(cat "$c/status")" "$(sort -u "$c/modes" | wc -l)" "$file" <<'PY'
+import hashlib, sys
+path, conn, status, nres, installed = sys.argv[1:6]
+e = open(path, "rb").read()
+name = "?"
 for i in range(4):
     d = e[54 + 18 * i:72 + 18 * i]
     if len(d) == 18 and d[:3] == b"\0\0\0" and d[3] == 0xFC:
-        print(d[5:].split(b"\n")[0].decode(errors="replace").strip())
-EOF
-)
-    echo "${c##*/card[0-9]-}:  $(cat "$c/status"), EDID '${name:-?}', $(sort -u "$c/modes" | wc -l) resolutions"
+        name = d[5:].split(b"\n")[0].decode(errors="replace").strip()
+d = e[54:72]
+pref = f"{d[2] | ((d[4] >> 4) << 8)}x{d[5] | ((d[7] >> 4) << 8)}" if len(e) >= 128 and (d[0] or d[1]) else "?"
+print(f"{conn}:  {status}, EDID '{name}', preferred {pref}, {nres} resolutions")
+if installed:
+    same = hashlib.sha256(e).digest() == hashlib.sha256(open(installed, "rb").read()).digest()
+    print(f"Loaded EDID {'matches' if same else 'DIFFERS from'} {installed}"
+          + ("" if same else " (stale initramfs? reinstall and reboot)"))
+PY
   done
 }
 
