@@ -340,12 +340,20 @@ per EDID forces a new overlay. Reinstalling untracks other EDIDs under
 kept: every rpm-ostree transaction rebuilds the overlay from the tracked list,
 and a file that some deployment still tracks must not disappear.
 
-Bazzite applies the new deployment while shutting down (ostree's finalize
-step, limited to 5 minutes). If the VM is busy, for example still driving a
-huge mode, finalizing can time out and the update is silently dropped
-(`journalctl -b -1 -u ostree-finalize-staged` shows "Stopping timed out").
-Stopping the display manager first (`sudo systemctl stop sddm`) before
-rebooting avoids that.
+Bazzite applies the new deployment while shutting down: ostree's finalize
+step, which systemd kills after 5 minutes. On a slow (here: rotational) disk,
+finalizing took 6.5 minutes, so the update was silently dropped and the old
+deployment booted again (`journalctl -b -1 -u ostree-finalize-staged` shows
+"Stopping timed out"). Raising that one service's stop timeout fixed it:
+
+```sh
+sudo mkdir -p /etc/systemd/system/ostree-finalize-staged.service.d
+printf '[Service]\nTimeoutStopSec=30min\n' |
+  sudo tee /etc/systemd/system/ostree-finalize-staged.service.d/10-timeout.conf
+sudo systemctl daemon-reload
+```
+
+Then let the shutdown run; don't force-stop the VM while it finalizes.
 
 After rebooting, `edid/vm-edid status` shows the EDID the kernel actually
 loaded (name, preferred mode, resolution count) and whether it matches the
