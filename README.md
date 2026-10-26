@@ -135,6 +135,7 @@ The layer is enabled **only** if the import is wrong without the layer
 | import correct without the layer | bug fixed elsewhere (Mesa/kernel) | off |
 | import still wrong with the layer | layer no longer works | off |
 | self-test can't run (no GBM, GPU missing, ...) | can't verify | off until a later check passes |
+| self-test times out (each run is limited to 20 s) | GPU busy, e.g. during boot | unchanged |
 | wrong without, correct with | bug present and fixed | **on** |
 
 `MODE=on` or `MODE=off` in `/etc/sunshine-dmabuf-fix.conf` overrides this.
@@ -260,7 +261,7 @@ warnings, but hasn't been booted on either system yet.
 
 ### Default modes
 
-Every resolution at every refresh rate, 156 modes in all, as CVT reduced
+Every resolution at every refresh rate (156 modes), plus the preferred mode, as CVT reduced
 blanking v2 timings:
 
 | Aspect | Resolutions |
@@ -271,12 +272,29 @@ blanking v2 timings:
 | 32:9 | 3840x1080, 5120x1440, 7680x2160 |
 
 Refresh rates: 60, 75, 100, 120, 144, 165, 175, 180, 200, 240, 280 and 360 Hz.
-The desktop starts at the preferred mode, 1920x1080 @ 60 by default.
+The desktop starts at the preferred mode, 1280x800 @ 60 by default; pick a
+bigger mode in KDE's display settings or Steam's display settings afterwards.
+
+**The preferred mode must match the VM's scanout size.** virtio-gpu deletes any
+mode flagged preferred unless it's 1024x768 or within 16 pixels of the size
+QEMU reports: the device's `xres`/`yres`, 1280x800 unless set. Without a
+preferred mode, compositors start at the first mode in the list, which is the
+biggest one: Gamescope comes up at 7680x2160 @ 360 Hz, and boot can slow to a crawl. The
+generator refuses a preferred mode that would be deleted. To start at
+2560x1440 @ 120, set the size on the host and tell the generator:
+
+```sh
+# Proxmox host, /etc/pve/qemu-server/<vmid>.conf (append to any existing args:)
+args: -set device.vga.xres=2560 -set device.vga.yres=1440
+```
+```sh
+# VM
+edid/vm-edid build --preferred 2560x1440@120 --host-size 2560x1440
+```
 
 Customize with `build` options (see `edid/make_edid.py --help`):
 
 ```sh
-edid/vm-edid build --preferred 2560x1440@120
 edid/vm-edid build --resolutions 2560x1440,3440x1440 --rates 60,120,165,240
 edid/vm-edid build --max-clock-mhz 2000   # drop the most extreme modes
 python3 edid/make_edid.py --list          # print the modes without writing a file

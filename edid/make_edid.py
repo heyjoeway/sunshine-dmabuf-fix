@@ -15,6 +15,11 @@ All timings are CVT reduced blanking v2. No range-limits descriptor is
 included and "continuous frequency" is off, so the kernel adds no inferred
 modes: the mode list is exactly what is generated here.
 
+The preferred mode must match the scanout size QEMU reports (the virtio-gpu
+device's xres/yres, 1280x800 unless set), or be 1024x768: virtio-gpu deletes
+any other mode marked preferred. With no preferred mode left, compositors fall
+back to the largest mode in the list.
+
 Run with --help for options; --list prints the modes without writing a file.
 """
 import argparse
@@ -33,7 +38,8 @@ DEFAULT_RESOLUTIONS = [
     "3840x1080", "5120x1440", "7680x2160",
 ]
 DEFAULT_RATES = [60, 75, 100, 120, 144, 165, 175, 180, 200, 240, 280, 360]
-DEFAULT_PREFERRED = "1920x1080@60"
+DEFAULT_PREFERRED = "1280x800@60"
+DEFAULT_HOST_SIZE = "1280x800"     # QEMU virtio-gpu xres/yres default
 DEFAULT_NAME = "VM Display"
 TIMINGS_PER_BLOCK = 5          # 5 x 20-byte Type I timings fit one DisplayID block
 MAX_DTD_CLOCK_KHZ = 655350     # EDID detailed timing limit
@@ -211,6 +217,9 @@ def main():
     ap.add_argument("-p", "--preferred", type=parse_mode, default=parse_mode(DEFAULT_PREFERRED),
                     help="mode the desktop starts in, WxH@Hz (default: %(default)s)".replace(
                         "%(default)s", DEFAULT_PREFERRED))
+    ap.add_argument("--host-size", type=parse_res, default=parse_res(DEFAULT_HOST_SIZE),
+                    help="scanout size QEMU reports, i.e. the virtio-gpu device's xres/yres "
+                         "(default: %s)" % DEFAULT_HOST_SIZE)
     ap.add_argument("--max-clock-mhz", type=float, default=0,
                     help="drop modes above this pixel clock (default: no limit)")
     ap.add_argument("-n", "--name", default=DEFAULT_NAME, help="monitor name, max 13 chars (default: %(default)s)")
@@ -218,6 +227,13 @@ def main():
     args = ap.parse_args()
 
     preferred = fit_dtd(cvt_rb2(*args.preferred))
+    pw, ph, hw, hh = preferred["w"], preferred["h"], *args.host_size
+    # virtio_gpu_conn_mode_valid() keeps a preferred mode only if it is 1024x768
+    # or at most 16 pixels smaller than the reported scanout in each direction.
+    if not ((pw, ph) == (1024, 768) or (hw - 16 <= pw <= hw and hh - 16 <= ph <= hh)):
+        sys.exit(f"preferred {pw}x{ph} doesn't match the scanout size {hw}x{hh}; virtio-gpu would "
+                 f"delete it. Set the VM's virtio-gpu xres/yres to {pw}x{ph} and pass "
+                 f"--host-size {pw}x{ph}, or pick a preferred mode of that size.")
     if preferred["clock_khz"] > MAX_DTD_CLOCK_KHZ:
         sys.exit(f"preferred mode needs {preferred['clock_khz'] / 1000:.0f} MHz; "
                  f"an EDID detailed timing allows at most {MAX_DTD_CLOCK_KHZ / 1000:.2f} MHz")

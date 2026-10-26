@@ -10,7 +10,7 @@ ConditionPathExists=@LIBDIR@/sunshine-dmabuf-fix
 [Service]
 Type=oneshot
 ExecStart=@LIBDIR@/sunshine-dmabuf-fix check --quiet --wait
-TimeoutStartSec=90
+TimeoutStartSec=75
 
 [Install]
 WantedBy=multi-user.target

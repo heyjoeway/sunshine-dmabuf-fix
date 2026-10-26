@@ -97,9 +97,11 @@ run_selftests() {
   write_manifest "$tmp/$MANIFEST_NAME" "$LIBDIR/$LAYER_LIB"
 
   # Implicit layers are switched off so neither run picks up an installed copy.
+  # Each run is time-limited: a busy or stalled GPU must not hold up boot.
+  local limit=(timeout --kill-after=5 "${SDF_SELFTEST_TIMEOUT:-20}")
   set +e
-  BASE_OUT=$(env VK_LOADER_LAYERS_DISABLE='~implicit~' "$LIBDIR/dmabuf-selftest" 2>/dev/null); BASE_RC=$?
-  LAYER_OUT=$(env VK_LOADER_LAYERS_DISABLE='~implicit~' VK_ADD_LAYER_PATH="$tmp" VK_INSTANCE_LAYERS=$LAYER_NAME \
+  BASE_OUT=$("${limit[@]}" env VK_LOADER_LAYERS_DISABLE='~implicit~' "$LIBDIR/dmabuf-selftest" 2>/dev/null); BASE_RC=$?
+  LAYER_OUT=$("${limit[@]}" env VK_LOADER_LAYERS_DISABLE='~implicit~' VK_ADD_LAYER_PATH="$tmp" VK_INSTANCE_LAYERS=$LAYER_NAME \
     DMABUF_DEDICATED_LAYER_ALL=1 "$LIBDIR/dmabuf-selftest" 2>/dev/null); LAYER_RC=$?
   set -e
   BASE_OUT=$(tail -n1 <<<"${BASE_OUT:-RESULT=ERROR no output}")
@@ -143,7 +145,16 @@ check() {
     auto)
       [ $wait = 1 ] && { wait_for_gpu || true; }
       run_selftests
+      # 124/137: timeout(1) stopped a run. That says nothing about the bug, so
+      # keep whatever state the last conclusive check left.
+      case "$BASE_RC $LAYER_RC" in
+        124\ * | 137\ * | *\ 124 | *\ 137)
+          BASE_RC=timeout ;;
+      esac
       case $BASE_RC in
+        timeout)
+          want=0; layer_enabled && want=1
+          reason="self-test timed out after ${SDF_SELFTEST_TIMEOUT:-20}s (GPU busy?); kept the previous state" ;;
         0) want=0; reason="bug not present: the import is already correct without the layer" ;;
         3) want=0; reason="not applicable: ${BASE_OUT#RESULT=NOT_NEEDED }" ;;
         1) if [ "$LAYER_RC" = 0 ]; then
