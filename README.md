@@ -39,7 +39,7 @@ this repo unnecessary.
 ## Install
 
 ```sh
-git clone --recurse-submodules https://github.com/<owner>/sunshine-dmabuf-fix.git
+git clone --recurse-submodules https://github.com/heyjoeway/sunshine-dmabuf-fix.git
 cd sunshine-dmabuf-fix
 ./sunshine-dmabuf-fix build          # as your user
 sudo ./sunshine-dmabuf-fix install
