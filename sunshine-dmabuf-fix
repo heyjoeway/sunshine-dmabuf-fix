@@ -1,0 +1,290 @@
+#!/usr/bin/env bash
+# sunshine-dmabuf-fix: install and maintain a Vulkan layer that fixes
+# garbled Sunshine Vulkan encoding under AMD native context (virtio-gpu).
+# See README.md for how it works.
+set -euo pipefail
+
+NAME=sunshine-dmabuf-fix
+LAYER_NAME=VK_LAYER_LOCAL_dmabuf_dedicated
+LAYER_LIB=libVkLayer_LOCAL_dmabuf_dedicated.so
+MANIFEST_NAME=VkLayer_LOCAL_dmabuf_dedicated.json
+
+# SDF_ROOT relocates every system path (used for testing in a scratch tree).
+R=${SDF_ROOT:-}
+LIBDIR=$R/usr/local/lib/$NAME
+MANIFEST_DST=$R/etc/vulkan/implicit_layer.d/$MANIFEST_NAME
+STATE_DIR=$R/var/lib/$NAME
+STATE_FILE=$STATE_DIR/state
+CONF_FILE=$R/etc/$NAME.conf
+UNIT_FILE=$R/etc/systemd/system/$NAME.service
+APT_HOOK=$R/etc/apt/apt.conf.d/99$NAME
+LEGACY_LIB=$R/usr/local/lib/$LAYER_LIB
+
+SELF=$(readlink -f "${BASH_SOURCE[0]}")
+SRC_DIR=$(dirname "$SELF")
+
+die() { echo "$NAME: $*" >&2; exit 1; }
+say() { [ "${QUIET:-0}" = 1 ] || echo "$*"; }
+need_root() { [ -n "$R" ] || [ "$(id -u)" = 0 ] || die "run this as root (sudo $0 $1)"; }
+
+# ---------------------------------------------------------------- platform
+
+os_field() { (. "$R/etc/os-release" 2>/dev/null || . /etc/os-release; eval "echo \${$1:-}"); }
+
+detect_os() {
+  local id variant name version
+  id=$(os_field ID); variant=$(os_field VARIANT_ID); name=$(os_field NAME); version=$(os_field VERSION_ID)
+  if [[ "$id $variant $name" == *[Bb]azzite* ]]; then
+    echo bazzite
+  elif [ "$id" = ubuntu ] && [ "$version" = 26.04 ]; then
+    echo ubuntu-lts
+  elif [ "$id" = ubuntu ]; then
+    echo "ubuntu-$version"
+  else
+    echo "$id"
+  fi
+}
+
+# --------------------------------------------------------------------- build
+
+build() {
+  local out=${1:-$SRC_DIR/build}
+  local inc=$SRC_DIR/third_party/Vulkan-Headers/include
+  [ -f "$inc/vulkan/vk_layer.h" ] || die "Vulkan-Headers submodule missing; run: git submodule update --init"
+  mkdir -p "$out"
+  local cc=${CC:-}
+  if [ -z "$cc" ]; then
+    for c in cc gcc clang; do command -v "$c" >/dev/null && { cc=$c; break; }; done
+  fi
+  if [ -n "$cc" ]; then
+    "$cc" -O2 -Wall -fPIC -shared -fvisibility=hidden -I"$inc" \
+      "$SRC_DIR/layer/dmabuf_dedicated_layer.c" -o "$out/$LAYER_LIB" -lpthread
+    "$cc" -O2 -Wall -I"$inc" "$SRC_DIR/selftest/dmabuf_selftest.c" -o "$out/dmabuf-selftest" -ldl
+  elif command -v podman >/dev/null; then
+    # Bazzite and other image-based systems ship no compiler on the host.
+    say "No host compiler; building in a Fedora container with podman..."
+    podman run --rm --security-opt label=disable -v "$SRC_DIR":/src -w /src \
+      registry.fedoraproject.org/fedora:latest \
+      sh -c "dnf -y -q install gcc >/dev/null && CC=gcc ./$NAME build /src/build-container" \
+      || die "container build failed"
+    mkdir -p "$out"
+    mv -f "$SRC_DIR/build-container/"* "$out/" && rmdir "$SRC_DIR/build-container"
+  else
+    die "no C compiler and no podman found; install gcc (or use a toolbox/distrobox) and rerun"
+  fi
+  say "Built $out/$LAYER_LIB and $out/dmabuf-selftest"
+}
+
+# -------------------------------------------------------------------- manifest
+
+write_manifest() {  # $1 = destination, $2 = library path
+  mkdir -p "$(dirname "$1")"
+  sed "s#@LIBRARY_PATH@#$2#" "$LIBDIR/$MANIFEST_NAME.in" > "$1.tmp"
+  mv -f "$1.tmp" "$1"
+}
+
+layer_enabled() { [ -f "$MANIFEST_DST" ]; }
+
+# ---------------------------------------------------------------- self-test
+
+# Runs the self-test once without and once with the layer.
+# Sets BASE_RC/BASE_OUT and LAYER_RC/LAYER_OUT.
+run_selftests() {
+  local tmp
+  tmp=$(mktemp -d)
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmp'" RETURN
+  write_manifest "$tmp/$MANIFEST_NAME" "$LIBDIR/$LAYER_LIB"
+
+  # Implicit layers are switched off so neither run picks up an installed copy.
+  set +e
+  BASE_OUT=$(env VK_LOADER_LAYERS_DISABLE='~implicit~' "$LIBDIR/dmabuf-selftest" 2>/dev/null); BASE_RC=$?
+  LAYER_OUT=$(env VK_LOADER_LAYERS_DISABLE='~implicit~' VK_ADD_LAYER_PATH="$tmp" VK_INSTANCE_LAYERS=$LAYER_NAME \
+    DMABUF_DEDICATED_LAYER_ALL=1 "$LIBDIR/dmabuf-selftest" 2>/dev/null); LAYER_RC=$?
+  set -e
+  BASE_OUT=$(tail -n1 <<<"${BASE_OUT:-RESULT=ERROR no output}")
+  LAYER_OUT=$(tail -n1 <<<"${LAYER_OUT:-RESULT=ERROR no output}")
+}
+
+wait_for_gpu() {
+  local i
+  for i in $(seq 1 30); do
+    compgen -G "/dev/dri/renderD*" >/dev/null && return 0
+    sleep 1
+  done
+  return 1
+}
+
+# ------------------------------------------------------------------- check
+
+# Decide whether the layer should be active and apply it.
+# Rule: the layer is enabled only while the most recent self-test showed that
+# the bug is present without it AND fixed with it.
+check() {
+  need_root check
+  local wait=0
+  for a in "$@"; do
+    case $a in
+      --quiet) QUIET=1 ;;
+      --wait) wait=1 ;;
+    esac
+  done
+  [ -x "$LIBDIR/dmabuf-selftest" ] || die "not installed (missing $LIBDIR)"
+
+  local mode=auto
+  [ -f "$CONF_FILE" ] && mode=$(sed -n 's/^MODE=//p' "$CONF_FILE" | tail -n1)
+  mode=${mode:-auto}
+
+  local want reason
+  BASE_RC=- BASE_OUT=- LAYER_RC=- LAYER_OUT=-
+  case $mode in
+    off) want=0; reason="disabled by MODE=off in $CONF_FILE" ;;
+    on) want=1; reason="forced on by MODE=on in $CONF_FILE (self-test skipped)" ;;
+    auto)
+      [ $wait = 1 ] && { wait_for_gpu || true; }
+      run_selftests
+      case $BASE_RC in
+        0) want=0; reason="bug not present: the import is already correct without the layer" ;;
+        3) want=0; reason="not applicable: ${BASE_OUT#RESULT=NOT_NEEDED }" ;;
+        1) if [ "$LAYER_RC" = 0 ]; then
+             want=1; reason="bug present and fixed by the layer"
+           else
+             want=0; reason="layer no longer fixes the import (${LAYER_OUT}); disabled to stay out of the way"
+           fi ;;
+        *) want=0; reason="self-test could not run (${BASE_OUT}); disabled until it can verify" ;;
+      esac ;;
+    *) die "invalid MODE=$mode in $CONF_FILE (use auto, on or off)" ;;
+  esac
+
+  local was=disabled now
+  layer_enabled && was=enabled
+  if [ "$want" = 1 ]; then
+    write_manifest "$MANIFEST_DST" "$LIBDIR/$LAYER_LIB"; now=enabled
+  else
+    rm -f "$MANIFEST_DST"; now=disabled
+  fi
+
+  mkdir -p "$STATE_DIR"
+  cat > "$STATE_FILE" <<EOF
+STATE=$now
+REASON=$reason
+MODE=$mode
+CHECKED=$(date -Is)
+BASELINE=$BASE_OUT
+WITH_LAYER=$LAYER_OUT
+EOF
+  if [ "$was" != "$now" ] || [ "${QUIET:-0}" != 1 ]; then
+    echo "$NAME: layer $now ($reason)"
+  fi
+}
+
+# ----------------------------------------------------------------- install
+
+install_files() {
+  need_root install
+  local os force=0
+  for a in "$@"; do [ "$a" = --force ] && force=1; done
+  os=$(detect_os)
+  case $os in
+    ubuntu-lts | bazzite) ;;
+    *) [ $force = 1 ] || die "unsupported system '$os' (supported: Ubuntu 26.04 LTS, Bazzite); use --force to try anyway" ;;
+  esac
+
+  local build_dir=$SRC_DIR/build
+  if [ ! -f "$build_dir/$LAYER_LIB" ] || [ ! -f "$build_dir/dmabuf-selftest" ] ||
+     [ "$SRC_DIR/layer/dmabuf_dedicated_layer.c" -nt "$build_dir/$LAYER_LIB" ] ||
+     [ "$SRC_DIR/selftest/dmabuf_selftest.c" -nt "$build_dir/dmabuf-selftest" ]; then
+    build "$build_dir"
+  fi
+
+  # Self-contained snapshot: everything the update hooks need, nothing fetched later.
+  mkdir -p "$LIBDIR"
+  install -m 0755 "$SELF" "$LIBDIR/$NAME"
+  install -m 0644 "$build_dir/$LAYER_LIB" "$LIBDIR/$LAYER_LIB"
+  install -m 0755 "$build_dir/dmabuf-selftest" "$LIBDIR/dmabuf-selftest"
+  install -m 0644 "$SRC_DIR/share/$MANIFEST_NAME.in" "$LIBDIR/$MANIFEST_NAME.in"
+  local version
+  version=$(git -C "$SRC_DIR" describe --always --dirty --tags 2>/dev/null || echo unknown)
+  printf 'VERSION=%s\nINSTALLED=%s\nOS=%s\nSOURCE=%s\n' "$version" "$(date -Is)" "$os" "$SRC_DIR" > "$LIBDIR/installed"
+
+  mkdir -p "$(dirname "$UNIT_FILE")"
+  sed "s#@LIBDIR@#${LIBDIR#$R}#g" "$SRC_DIR/share/$NAME.service.in" > "$UNIT_FILE"
+  if [ "$os" != bazzite ] && [ -d "$R/etc/apt" ]; then
+    mkdir -p "$(dirname "$APT_HOOK")"
+    sed "s#@LIBDIR@#${LIBDIR#$R}#g" "$SRC_DIR/share/apt-hook.in" > "$APT_HOOK"
+  fi
+  [ -f "$CONF_FILE" ] || install -m 0644 "$SRC_DIR/share/$NAME.conf" "$CONF_FILE"
+
+  # Prototype from before this repo existed.
+  rm -f "$LEGACY_LIB"
+
+  if [ -z "$R" ]; then
+    systemctl daemon-reload
+    systemctl enable "$NAME.service" >/dev/null 2>&1
+  fi
+  say "Installed $version to ${LIBDIR#$R}"
+  check
+  say "Sunshine picks up the change on its next stream (restart it if a stream is running)."
+}
+
+uninstall_files() {
+  need_root uninstall
+  if [ -z "$R" ]; then systemctl disable "$NAME.service" >/dev/null 2>&1 || true; fi
+  rm -f "$MANIFEST_DST" "$UNIT_FILE" "$APT_HOOK" "$LEGACY_LIB"
+  rm -rf "$LIBDIR" "$STATE_DIR"
+  [ -z "$R" ] && systemctl daemon-reload
+  say "Removed. $CONF_FILE was kept (delete it by hand if you like)."
+}
+
+# ------------------------------------------------------------------ status
+
+status() {
+  echo "System:      $(detect_os)"
+  if [ -f "$LIBDIR/installed" ]; then
+    echo "Installed:   $(sed -n 's/^VERSION=//p' "$LIBDIR/installed") at ${LIBDIR#$R}"
+  else
+    echo "Installed:   no"
+  fi
+  if layer_enabled; then echo "Layer:       enabled (${MANIFEST_DST#$R})"; else echo "Layer:       disabled"; fi
+  if [ -f "$STATE_FILE" ]; then
+    sed -n 's/^REASON=/Reason:      /p; s/^CHECKED=/Last check:  /p; s/^BASELINE=/Without:     /p; s/^WITH_LAYER=/With layer:  /p' "$STATE_FILE"
+  fi
+  # Where Sunshine comes from matters for whether it can see the layer.
+  if command -v flatpak >/dev/null && flatpak info dev.lizardbyte.app.Sunshine >/dev/null 2>&1; then
+    echo "Warning:     Flatpak Sunshine is installed; it cannot load host Vulkan layers."
+  fi
+  local bin
+  bin=$(command -v sunshine 2>/dev/null || true)
+  if [ -n "$bin" ]; then
+    echo "Sunshine:    $(readlink -f "$bin")"
+    case $(readlink -f "$bin") in
+      */linuxbrew/*) echo "Note:        Homebrew Sunshine: check its log shows 'RADV' in the GPU listing (see README)." ;;
+    esac
+  fi
+  echo "Runtime log: journalctl --user -u app-dev.lizardbyte.app.Sunshine | grep dmabuf_dedicated"
+}
+
+usage() {
+  cat <<EOF
+Usage: $NAME <command>
+
+  build              compile the layer and self-test into ./build
+  install [--force]  build if needed, install, enable the hooks, run check (root)
+  check [--quiet] [--wait]
+                     run the self-test and enable/disable the layer (root);
+                     this is what the boot service and apt hook run
+  status             show what is installed and why it is on or off
+  uninstall          remove everything except $CONF_FILE (root)
+EOF
+}
+
+cmd=${1:-}
+[ $# -gt 0 ] && shift
+case $cmd in
+  build) build "$@" ;;
+  install) install_files "$@" ;;
+  check) check "$@" ;;
+  status) status ;;
+  uninstall) uninstall_files ;;
+  *) usage; [ -z "$cmd" ] || exit 1 ;;
+esac

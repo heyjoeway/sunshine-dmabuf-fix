@@ -1,0 +1,4 @@
+// Installed by sunshine-dmabuf-fix: re-validate the Sunshine DMA-BUF layer
+// after every dpkg run (Mesa, Sunshine, kernel updates), using only the
+// installed snapshot. Never fails the apt transaction.
+DPkg::Post-Invoke { "if [ -x @LIBDIR@/sunshine-dmabuf-fix ]; then @LIBDIR@/sunshine-dmabuf-fix check --quiet || true; fi"; };

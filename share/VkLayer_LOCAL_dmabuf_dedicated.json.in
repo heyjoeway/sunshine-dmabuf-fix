@@ -1,0 +1,17 @@
+{
+  "file_format_version": "1.0.0",
+  "layer": {
+    "name": "VK_LAYER_LOCAL_dmabuf_dedicated",
+    "type": "GLOBAL",
+    "library_path": "@LIBRARY_PATH@",
+    "api_version": "1.4.303",
+    "implementation_version": "2",
+    "description": "Dedicated allocations for implicit-modifier DMA-BUF imports in Sunshine (AMD native context)",
+    "functions": {
+      "vkNegotiateLoaderLayerInterfaceVersion": "vkNegotiateLoaderLayerInterfaceVersion"
+    },
+    "disable_environment": {
+      "DISABLE_DMABUF_DEDICATED_LAYER": "1"
+    }
+  }
+}

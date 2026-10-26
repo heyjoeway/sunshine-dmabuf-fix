@@ -1,0 +1,16 @@
+# Re-validates the Sunshine DMA-BUF layer at every boot, so OS updates that
+# only take effect after a reboot (rpm-ostree on Bazzite, kernels, Mesa) are
+# checked before the desktop starts. Uses only the installed snapshot.
+[Unit]
+Description=Re-validate the Sunshine DMA-BUF workaround layer
+After=systemd-udevd.service systemd-modules-load.service local-fs.target
+Before=display-manager.service
+ConditionPathExists=@LIBDIR@/sunshine-dmabuf-fix
+
+[Service]
+Type=oneshot
+ExecStart=@LIBDIR@/sunshine-dmabuf-fix check --quiet --wait
+TimeoutStartSec=90
+
+[Install]
+WantedBy=multi-user.target
