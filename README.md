@@ -1,5 +1,12 @@
 # sunshine-dmabuf-fix
 
+> [!NOTE]
+> This repo is a follow-up to
+> [zeroqn/proxmox-native-context](https://github.com/zeroqn/proxmox-native-context),
+> which sets up the Proxmox host side of AMD virtio-gpu native context. Start
+> there; this repo covers what comes after inside the guest: Sunshine streaming
+> and high-refresh display modes.
+
 A workaround for **garbled video when Sunshine uses Vulkan hardware encoding
 inside a VM with AMD virtio-gpu native context** (`drm_native_context=on`,
 Mesa built with `-Damdgpu-virtio=true`). The garbling shows up as horizontal
