@@ -19,6 +19,10 @@ Supported and tested, each with a clean Moonlight stream:
 Both run as Proxmox VE 9 guests. Bazzite has a few problems of its own that
 this layer doesn't fix; see [Bazzite notes](#bazzite-notes).
 
+The repo also includes [`edid/`](edid/), a separate tool that gives the VM
+high-resolution, high-refresh display modes (up to 7680x2160, 60–360 Hz,
+ultrawides included); see [High-refresh modes](#high-refresh-modes-custom-edid).
+
 ## The bug
 
 On virtio-gpu, the KMS framebuffers that GNOME/KDE scan out have no DRM
@@ -233,6 +237,105 @@ native-context VM also took the fixes below. None of them involve this layer.
   The stale file in this case was `99-plasma-setup.conf`, left behind after
   `plasma-setup` was removed from the image. Deleting it is fine.
 
+## High-refresh modes (custom EDID)
+
+A virtio-gpu VM only offers the modes in an EDID that QEMU generates: a
+1280x800 @ 75 Hz preferred mode, everything else at 50–60 Hz, and a range
+capped at 125 Hz. Neither QEMU nor Proxmox can change those refresh rates or
+supply your own EDID. [`edid/`](edid/) builds a replacement EDID and has the
+kernel load it at boot with `drm.edid_firmware=`. Every compositor then sees
+the same mode list: KDE's display settings, Gamescope, and Steam's resolution
+and refresh pickers in Game Mode.
+
+```sh
+edid/vm-edid build                    # as your user; writes build/vm-edid.bin
+sudo edid/vm-edid install             # then reboot
+edid/vm-edid status                   # after the reboot
+```
+
+The boot-time approach was tested on Bazzite in Gamescope, using an earlier
+six-mode EDID (4K120, 1440p120/240). The full default matrix below passes
+`edid-decode` and libdisplay-info (the parser KWin and Gamescope use) with no
+warnings, but hasn't been booted on either system yet.
+
+### Default modes
+
+Every resolution at every refresh rate, 156 modes in all, as CVT reduced
+blanking v2 timings:
+
+| Aspect | Resolutions |
+|---|---|
+| 16:9 | 1920x1080, 2560x1440, 3840x2160, 5120x2880 |
+| 16:10 | 1920x1200, 2560x1600 |
+| 21:9 and similar | 2560x1080, 3440x1440, 3840x1600, 5120x2160 |
+| 32:9 | 3840x1080, 5120x1440, 7680x2160 |
+
+Refresh rates: 60, 75, 100, 120, 144, 165, 175, 180, 200, 240, 280 and 360 Hz.
+The desktop starts at the preferred mode, 1920x1080 @ 60 by default.
+
+Customize with `build` options (see `edid/make_edid.py --help`):
+
+```sh
+edid/vm-edid build --preferred 2560x1440@120
+edid/vm-edid build --resolutions 2560x1440,3440x1440 --rates 60,120,165,240
+edid/vm-edid build --max-clock-mhz 2000   # drop the most extreme modes
+python3 edid/make_edid.py --list          # print the modes without writing a file
+```
+
+### How it works
+
+- **EDID layout:**
+  - The base EDID block carries only the preferred mode. Its detailed timing
+    format tops out at a 655 MHz pixel clock.
+  - Every other mode goes into DisplayID 1.3 extension blocks as Type I
+    timings, five per 128-byte block. The default matrix is 33 blocks (4 KB).
+  - DisplayID 2.0 Type VII timings would also work for the kernel, but
+    libdisplay-info doesn't decode them, so they aren't used.
+- **No inferred modes:** there's no range-limits descriptor and no
+  "continuous frequency" flag. Without them the kernel adds no inferred
+  in-between modes, so the mode list is exactly the matrix.
+- **The runtime override doesn't work:** virtio-gpu reads its EDID only when
+  the driver starts or when the host signals a display change. The debugfs
+  `edid_override` entry, followed by a `detect`, is accepted but never used.
+  So the EDID has to be loaded at boot.
+
+### What `install` does
+
+| | Ubuntu 26.04 | Bazzite |
+|---|---|---|
+| EDID file | `/usr/lib/firmware/edid/vm-edid.bin` | `/etc/firmware/edid/vm-edid.bin` (`/usr` is read-only) |
+| Kernel arguments | `/etc/default/grub.d/99-vm-edid.cfg`, then `update-grub` | `rpm-ostree kargs`: `drm.edid_firmware=…` and `firmware_class.path=/etc/firmware` |
+| Initramfs | hook `/etc/initramfs-tools/hooks/vm-edid`, then `update-initramfs -u` | `rpm-ostree initramfs-etc --track` (virtio-gpu is built into the kernel and starts early) |
+
+The connector is detected automatically: it's the one connected `Virtual-N`
+output; override it with `--connector`. On Bazzite, a reinstall replaces an
+existing `drm.edid_firmware=` argument and untracks the EDID it pointed at.
+
+### Surviving updates
+
+- **Ubuntu:**
+  - The grub drop-in and the firmware file aren't owned by any package.
+  - The initramfs hook copies the EDID into every rebuilt initramfs.
+- **Bazzite:** kernel arguments and `initramfs-etc` files carry over to every
+  new deployment.
+- **Different hardware:** the argument names the virtio-gpu connector, so on
+  other hardware (for example GPU passthrough) it matches nothing and does
+  nothing.
+
+### Limitations
+
+- **The refresh rate is a target on virtio-gpu, not a guarantee.** There's no
+  real scanout clock: a page flip completes when the host has processed the
+  frame. The compositor paces itself to the mode's refresh rate, but the
+  achieved frame rate depends on the host. With Proxmox's VNC console, QEMU
+  also reads every frame back for the console. If a high mode doesn't reach
+  its rate in Moonlight's statistics, check the QEMU process's CPU on the host.
+- **The top modes are there for completeness.** 7680x2160 @ 360 Hz is a
+  7.2 GHz pixel clock. Use `--max-clock-mhz` or a shorter list if the menus
+  get too long.
+- Changing modes still needs a reboot, because of the runtime limitation
+  above.
+
 ## Layout
 
 ```
@@ -240,6 +343,8 @@ layer/dmabuf_dedicated_layer.c   the Vulkan layer
 selftest/dmabuf_selftest.c       the import self-test
 share/                           manifest, systemd unit, apt hook, config templates
 sunshine-dmabuf-fix              build/install/check/status/uninstall
+edid/make_edid.py                EDID generator for high-refresh VM modes
+edid/vm-edid                     build/install/uninstall/status for the EDID
 third_party/Vulkan-Headers       submodule, pinned to v1.4.366 (headers only)
 ```
 

@@ -1,0 +1,228 @@
+#!/usr/bin/env bash
+# vm-edid: give a virtio-gpu VM a custom EDID with high-resolution,
+# high-refresh modes, loaded at boot with drm.edid_firmware.
+# See README.md ("High-refresh modes") for how and why.
+set -euo pipefail
+
+NAME=vm-edid
+EDID_NAME=vm-edid.bin
+KARG_KEY=drm.edid_firmware
+
+# VE_ROOT relocates every system path (used for testing in a scratch tree).
+R=${VE_ROOT:-}
+SELF=$(readlink -f "${BASH_SOURCE[0]}")
+SRC_DIR=$(dirname "$SELF")
+BUILD=$SRC_DIR/../build/$EDID_NAME
+
+# Ubuntu
+UB_FW=$R/usr/lib/firmware/edid/$EDID_NAME
+UB_GRUB=$R/etc/default/grub.d/99-$NAME.cfg
+UB_HOOK=$R/etc/initramfs-tools/hooks/$NAME
+# Bazzite (/usr is read-only, so the file lives in /etc)
+BZ_FW_DIR=/etc/firmware
+BZ_FW=$R$BZ_FW_DIR/edid/$EDID_NAME
+
+die() { echo "$NAME: $*" >&2; exit 1; }
+need_root() { [ -n "$R" ] || [ "$(id -u)" = 0 ] || die "run this as root (sudo $0 $1)"; }
+
+os_field() { (. "$R/etc/os-release" 2>/dev/null || . /etc/os-release; eval "echo \${$1:-}"); }
+
+detect_os() {
+  local id variant name version
+  id=$(os_field ID); variant=$(os_field VARIANT_ID); name=$(os_field NAME); version=$(os_field VERSION_ID)
+  if [[ "$id $variant $name" == *[Bb]azzite* ]]; then echo bazzite
+  elif [ "$id" = ubuntu ] && [ "$version" = 26.04 ]; then echo ubuntu-lts
+  elif [ "$id" = ubuntu ]; then echo "ubuntu-$version"
+  else echo "$id"
+  fi
+}
+
+# The connected virtio-gpu connector (virtio-gpu names its outputs Virtual-N).
+detect_connector() {
+  local found=() c
+  for c in /sys/class/drm/card*-Virtual-*; do
+    [ -e "$c/status" ] || continue
+    [ "$(cat "$c/status")" = connected ] && found+=("${c##*/card[0-9]-}")
+  done
+  case ${#found[@]} in
+    1) echo "${found[0]}" ;;
+    0) die "no connected Virtual-* connector found; is this a virtio-gpu VM? Pass --connector NAME" ;;
+    *) die "several connectors (${found[*]}); pick one with --connector NAME" ;;
+  esac
+}
+
+karg_value() { echo "$KARG_KEY=$1:edid/$EDID_NAME"; }
+
+# ------------------------------------------------------------------ build
+
+build() {
+  mkdir -p "$(dirname "$BUILD")"
+  python3 -I "$SRC_DIR/make_edid.py" -o "$BUILD" "$@"
+}
+
+# ---------------------------------------------------------------- Ubuntu
+
+install_ubuntu() {
+  local karg=$1
+  install -D -m 0644 "$BUILD" "$UB_FW"
+  # Copy the EDID into every initramfs, in case virtio-gpu ever loads from it.
+  mkdir -p "$(dirname "$UB_HOOK")"
+  cat > "$UB_HOOK" <<EOF
+#!/bin/sh
+# Installed by $NAME: include the custom EDID in the initramfs.
+case "\$1" in prereqs) exit 0 ;; esac
+. /usr/share/initramfs-tools/hook-functions
+mkdir -p "\${DESTDIR}/usr/lib/firmware/edid"
+cp /usr/lib/firmware/edid/$EDID_NAME "\${DESTDIR}/usr/lib/firmware/edid/"
+EOF
+  chmod 0755 "$UB_HOOK"
+  mkdir -p "$(dirname "$UB_GRUB")"
+  cat > "$UB_GRUB" <<EOF
+# Installed by $NAME: load the custom EDID for the virtio-gpu output.
+GRUB_CMDLINE_LINUX_DEFAULT="\${GRUB_CMDLINE_LINUX_DEFAULT} $karg"
+EOF
+  if [ -z "$R" ]; then
+    update-initramfs -u
+    update-grub
+  fi
+}
+
+uninstall_ubuntu() {
+  rm -f "$UB_FW" "$UB_HOOK" "$UB_GRUB"
+  if [ -z "$R" ]; then
+    update-initramfs -u
+    update-grub
+  fi
+}
+
+# --------------------------------------------------------------- Bazzite
+
+bz_current_karg() { rpm-ostree kargs | tr ' ' '\n' | grep "^$KARG_KEY=" || true; }
+
+bz_tracked() {  # $1 = path; is it tracked by rpm-ostree initramfs-etc?
+  rpm-ostree status --json | python3 -I -c '
+import json, sys
+d = json.load(sys.stdin)["deployments"][0]
+print("\n".join(d.get("initramfs-etc", [])))' | grep -qx "$1"
+}
+
+install_bazzite() {
+  local karg=$1 current
+  install -D -m 0644 "$BUILD" "$BZ_FW"
+  [ -n "$R" ] && return
+  current=$(bz_current_karg)
+  local args=(--append-if-missing="firmware_class.path=$BZ_FW_DIR")
+  if [ -z "$current" ]; then
+    args+=(--append="$karg")
+  elif [ "$current" != "$karg" ]; then
+    args+=(--replace="$karg")
+    echo "Replacing existing $current"
+    # Stop shipping the EDID the old argument pointed at (the file itself is kept).
+    local old=$BZ_FW_DIR/${current##*:}
+    if [ "$old" != "$BZ_FW_DIR/edid/$EDID_NAME" ] && bz_tracked "$old"; then
+      rpm-ostree initramfs-etc --untrack="$old"
+    fi
+  fi
+  rpm-ostree kargs "${args[@]}"
+  # initramfs-etc copies the file into the initramfs; --force-sync picks up a changed file.
+  if bz_tracked "$BZ_FW_DIR/edid/$EDID_NAME"; then
+    rpm-ostree initramfs-etc --force-sync
+  else
+    rpm-ostree initramfs-etc --track="$BZ_FW_DIR/edid/$EDID_NAME"
+  fi
+}
+
+uninstall_bazzite() {
+  rm -f "$BZ_FW"
+  [ -n "$R" ] && return
+  local current
+  current=$(bz_current_karg)
+  [ -n "$current" ] && rpm-ostree kargs --delete="$current"
+  rpm-ostree kargs --delete-if-present="firmware_class.path=$BZ_FW_DIR"
+  bz_tracked "$BZ_FW_DIR/edid/$EDID_NAME" && rpm-ostree initramfs-etc --untrack="$BZ_FW_DIR/edid/$EDID_NAME"
+  true
+}
+
+# ------------------------------------------------------------ commands
+
+install_cmd() {
+  need_root install
+  local connector="" force=0
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --connector) connector=$2; shift ;;
+      --file) BUILD=$(readlink -f "$2"); shift ;;
+      --force) force=1 ;;
+      *) die "unknown option $1" ;;
+    esac
+    shift
+  done
+  [ -f "$BUILD" ] || die "no EDID at $BUILD; run '$0 build' first (as your user)"
+  local size; size=$(stat -c %s "$BUILD")
+  [ $((size % 128)) = 0 ] || die "$BUILD is $size bytes; an EDID is a multiple of 128"
+  [ -n "$connector" ] || connector=$(detect_connector)
+  local karg; karg=$(karg_value "$connector")
+
+  local os; os=$(detect_os)
+  case $os in
+    ubuntu-lts) install_ubuntu "$karg" ;;
+    bazzite) install_bazzite "$karg" ;;
+    ubuntu-*) [ $force = 1 ] || die "untested Ubuntu release '$os'; use --force"; install_ubuntu "$karg" ;;
+    *) die "unsupported system '$os' (supported: Ubuntu 26.04 LTS, Bazzite)" ;;
+  esac
+  echo "Installed $EDID_NAME for $connector ($karg). Reboot to use it."
+}
+
+uninstall_cmd() {
+  need_root uninstall
+  case $(detect_os) in
+    bazzite) uninstall_bazzite ;;
+    *) uninstall_ubuntu ;;
+  esac
+  echo "Removed. Reboot to return to QEMU's own EDID."
+}
+
+status_cmd() {
+  echo "System:     $(detect_os)"
+  local arg
+  arg=$(tr ' ' '\n' < /proc/cmdline | grep "^$KARG_KEY=" || true)
+  echo "Booted with: ${arg:-no $KARG_KEY}"
+  local c
+  for c in /sys/class/drm/card*-Virtual-*; do
+    [ -e "$c/edid" ] || continue
+    local name
+    name=$(python3 -I - "$c/edid" <<'EOF'
+import sys
+e = open(sys.argv[1], "rb").read()
+for i in range(4):
+    d = e[54 + 18 * i:72 + 18 * i]
+    if len(d) == 18 and d[:3] == b"\0\0\0" and d[3] == 0xFC:
+        print(d[5:].split(b"\n")[0].decode(errors="replace").strip())
+EOF
+)
+    echo "${c##*/card[0-9]-}:  $(cat "$c/status"), EDID '${name:-?}', $(sort -u "$c/modes" | wc -l) resolutions"
+  done
+}
+
+usage() {
+  cat <<EOF
+Usage: $NAME <command>
+
+  build [make_edid.py options]   generate ../build/$EDID_NAME (run as your user)
+                                 e.g. build --preferred 2560x1440@120
+  install [--connector NAME] [--file EDID] [--force]
+                                 install the EDID and boot config (root), then reboot
+  uninstall                      remove it (root), then reboot
+  status                         show what the kernel booted with
+EOF
+}
+
+cmd=${1:-}
+[ $# -gt 0 ] && shift
+case $cmd in
+  build) build "$@" ;;
+  install) install_cmd "$@" ;;
+  uninstall) uninstall_cmd ;;
+  status) status_cmd ;;
+  *) usage; [ -z "$cmd" ] || exit 1 ;;
+esac
